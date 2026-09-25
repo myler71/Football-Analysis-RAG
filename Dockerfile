@@ -1,3 +1,15 @@
+FROM node:20-slim AS frontend-build
+
+# The FastAPI app serves frontend/dist at /app. Without this stage the image
+# ships only frontend/index.html, which references /src/main.jsx and renders blank.
+WORKDIR /build
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
 FROM python:3.11-slim
 
 # Prevent Python from writing .pyc and ensure real-time logging output
@@ -20,6 +32,9 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 
 # Copy source code and files
 COPY . .
+
+# Install the compiled frontend over the source tree
+COPY --from=frontend-build /build/dist ./frontend/dist
 
 # Ensure write permissions for outputs and reports (required for Hugging Face UID 1000)
 RUN chmod -R 777 /app

@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: football-intelligence
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    # Free web services spin down after ~15 minutes idle and take ~30-60s to wake.
+    # This app is stateless between requests, so sleep is safe — it only costs
+    # a slow first request after an idle period.
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: LOG_LEVEL
+        value: INFO
+      - key: CORS_ORIGINS
+        value: http://localhost:3000,http://localhost:5173,http://localhost:8000
+
+      # ── Supabase (Postgres + pgvector) ────────────────────────────────
+      # Project Settings → API → Connection string → URI (session mode).
+      # Must include ?sslmode=require for Supabase.
+      - key: DATABASE_URL
+        sync: false
+
+      # ── LLM provider for the six persona agents ───────────────────────
+      # Any OpenAI-compatible endpoint. See docs/llm_provider.md.
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_BASE_URL
+        sync: false
+      - key: LLM_MODEL
+        sync: false
+
+      # ── OpenRouter embeddings for the Week 1 RAG knowledge base ────────
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: liquid/lfm-2.5-embedding-350m:free
