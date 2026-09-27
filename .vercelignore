@@ -1,0 +1,17 @@
+.git
+.env
+.env.*
+.vercel
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+frontend/node_modules/
+frontend/dist/
+outputs/
+reports/
+data/
+personas/generated/
+week*.md
+.claude/

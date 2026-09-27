@@ -151,6 +151,54 @@ Then visit:
 3. In **Settings** $\to$ **Variables and Secrets**, add `OPENAI_API_KEY`.
 4. Hugging Face builds and hosts the container automatically with public HTTPS.
 
+### Option C: Vercel (Serverless, Reduced Compute)
+
+The whole platform also runs on Vercel from a single Python function: `main.py` at the repository root
+exports the same `src.api.main:app` ASGI application, and `vercel.json` builds the Vite bundle before
+packaging it. Vercel serves every path — API, `/app/*` frontend, `/docs` — from that function.
+
+```bash
+npx vercel@latest link --project football-analysis-rag
+npx vercel@latest blob create-store football-rag-state --access private --yes
+npx vercel@latest deploy --prod
+```
+
+Serverless instances have no writable project directory, so the deployment differs from Docker in
+three ways:
+
+1. **State lives in the platform temp directory.** `src/platform/runtime.py` resolves every writable
+   path (`outputs/`, `reports/`, `data/`, generated personas) under `STATE_ROOT`: the project root for
+   Docker/local runs, `$TMPDIR/football-rag` inside a Function. Each cold start runs
+   `ensure_demo_state()` once, which recreates the deterministic demo dataset (user
+   `marwan@football.ai` / `password123`, both seeded discussions, the demo report).
+2. **Discussion records are mirrored to Vercel Blob.** `src/platform/artifact_store.py` pushes every
+   finished record to `discussions/<id>.json` in the connected store and pulls it back on a local
+   miss, so a read served by an instance that never ran the deliberation still returns the full
+   transcript. Without a connected store the app degrades to per-instance records.
+3. **Deliberations run inside the request with hard caps.** The API clamps every request to
+   `DISCUSSION_MAX_ROUNDS` / `DISCUSSION_MAX_AGENTS`, runs the discussion synchronously (a background
+   thread does not survive the response), and bounds agent tool rounds and retries.
+
+Environment variables for `production` and `preview` (values from your local `.env`):
+
+| Variable | Value | Purpose |
+| :--- | :--- | :--- |
+| `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` | as in `.env` | LLM provider |
+| `LLM_TEMPERATURE` / `LLM_MAX_TOKENS` | `0.2` / `1024` | Keep each turn cheap |
+| `LLM_TIMEOUT_SECONDS` / `LLM_MAX_RETRIES` / `LLM_RETRY_MAX_WAIT_SECONDS` | `60` / `1` / `15` | Fail fast inside the 300 s function budget |
+| `DISCUSSION_DEFAULT_ROUNDS` / `DISCUSSION_MAX_ROUNDS` | `1` / `2` | Rounds budget (the API clamps above the max) |
+| `DISCUSSION_DEFAULT_AGENTS` / `DISCUSSION_MAX_AGENTS` | `3` / `3` | Agent budget |
+| `AGENT_MAX_TOOL_ROUNDS` | `1` | Tool-calling rounds per agent turn |
+| `AGENT_RETRY_ATTEMPTS` / `AGENT_RETRY_BACKOFF_SECONDS` | `1` / `5` | Turn retry policy |
+| `LOG_LEVEL` / `PYTHONUNBUFFERED` | `INFO` / `1` | Logging |
+
+`BLOB_READ_WRITE_TOKEN` is set automatically when the Blob store is connected. Do **not** set
+`DATABASE_URL`, `DB_HOST`, `OPENAI_API_KEY` or `OPENROUTER_MODEL`: their absence is what selects the
+intended degraded path (SQLite platform DB in the temp directory, no pgvector retrieval).
+
+Expected run shape with the values above: 3 agents × (opening + 2 rounds) = 9 turns, ~1–2 LLM calls
+per turn, 50–150 s per deliberation — comfortably inside the 300 s Hobby maximum.
+
 ---
 
 ## 8. Verification & Health Monitoring
@@ -186,4 +234,6 @@ pytest tests/test_api.py tests/test_health.py -v
 | **Frontend assets 404** | Missing `frontend/` directory inside container. | `Dockerfile` copies all files (`COPY . .`), ensuring `/app/frontend` is available to FastAPI static files. |
 | **Discussion history persistence** | Ephemeral container rebuilds in cloud. | Mount a persistent volume to `/app/outputs` and `/app/reports/api_cache` (pre-configured in `docker-compose.yml`). |
 | **DevOps tab hidden in UI** | Intentionally restricted to administrators. | Append `?admin=true` to the URL (e.g. `http://localhost:8000/?admin=true`) to unlock the DevOps Command Center. Click "Exit Admin Mode" to return to standard user view. |
+| **Vercel: 404 for a discussion that just ran** | The record lives on the instance that produced it and no Blob store is connected. | Connect the store (`npx vercel blob create-store football-rag-state --access private --yes`) so records are mirrored and restored across instances. |
+| **Vercel: `FUNCTION_INVOCATION_TIMEOUT` (504)** | A capped run still exceeded the 300 s Hobby maximum. | Lower `DISCUSSION_MAX_ROUNDS`, `AGENT_MAX_TOOL_ROUNDS` and `AGENT_RETRY_ATTEMPTS` in the project environment; failed runs still save a partial record that History lists. |
 
