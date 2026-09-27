@@ -99,6 +99,19 @@ async def lifespan(app: FastAPI):
         init_platform_db()
     except Exception as e:
         logger.warning("Platform database initialization failed: %s", e)
+
+    # Rebuild the deterministic demo dataset in the writable state directory.
+    # Serverless instances get a fresh state directory per cold start, so every
+    # instance serves the same demo user, discussions and report. Tests keep
+    # their own fixtures and are left untouched.
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        try:
+            from src.platform.seed import ensure_demo_state
+
+            await run_in_threadpool(ensure_demo_state)
+        except Exception as e:
+            logger.warning("Demo state seeding failed: %s", e)
+
     start_discussion_worker()
 
     try:

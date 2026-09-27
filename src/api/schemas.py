@@ -1,8 +1,20 @@
 """Pydantic v2 schemas for the Football Analysis Platform API."""
 
+import os
 import re
 from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an integer request default from the environment.
+
+    Validation stays permissive; the deployment caps the accepted value.
+    """
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError:
+        return default
 
 
 # ── Health Check ──
@@ -69,10 +81,10 @@ class DiscussionDetailResponse(BaseModel):
 # ── Start Discussion ──
 class StartDiscussionRequest(BaseModel):
     topic: str = Field(min_length=1)
-    num_rounds: int = Field(default=3, ge=1, le=10)
+    num_rounds: int = Field(default=_env_int("DISCUSSION_DEFAULT_ROUNDS", 3), ge=1, le=10)
     discussion_id: str | None = Field(default=None, description="Discussion ID. Spaces are automatically sanitized.")
     num_agents: int = Field(
-        default=6,
+        default=_env_int("DISCUSSION_DEFAULT_AGENTS", 6),
         ge=2,
         le=6,
         description="Number of specialist agents in the deliberation (2-6, default 6).",

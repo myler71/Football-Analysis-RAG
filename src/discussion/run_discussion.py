@@ -43,6 +43,7 @@ from src.discussion.persistence import (
     save_discussion_from_state,
 )
 from src.discussion.router import GraphRouter
+from src.platform import runtime
 from src.tools.calculator import CalculatorTool
 from src.tools.knowledge_search import KnowledgeSearchTool
 from src.tools.web_search import WebSearchTool
@@ -73,6 +74,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=6,
         help="Number of specialist agents in the deliberation (2-6; default 6).",
+    )
+    parser.add_argument(
+        "--max-tool-rounds",
+        type=int,
+        default=int(os.environ.get("AGENT_MAX_TOOL_ROUNDS", "3")),
+        help="Maximum tool-calling rounds per agent turn (default 3).",
     )
     parser.add_argument(
         "--discussion-id",
@@ -136,11 +143,17 @@ def main(argv: list[str] | None = None) -> int:
         from src.agent.persona_generator import generate_personas_for_topic
         from src.discussion.graph import DiscussionGraph
 
+        persona_output_dir = (
+            runtime.GENERATED_PERSONAS_DIR
+            if runtime.is_serverless()
+            else Path(args.personas_dir) / "generated"
+        )
+
         personas_dict, persona_files_map, manifest = generate_personas_for_topic(
             topic=args.topic,
             llm=llm,
             discussion_id=discussion_id,
-            output_dir=Path(args.personas_dir) / "generated",
+            output_dir=persona_output_dir,
             force_regenerate=args.force_regenerate,
         )
         graph = DiscussionGraph.create_symmetrical_3v3(
@@ -166,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 llm=llm,
             )
-            agents[agent_id] = Agent(config, max_tool_rounds=3)
+            agents[agent_id] = Agent(config, max_tool_rounds=args.max_tool_rounds)
     else:
         roster = select_agent_roster(getattr(args, "agents", 6))
         if len(roster) == len(DEFAULT_AGENT_ROSTER):
@@ -193,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 llm=llm,
             )
-            agents[agent_id] = Agent(config, max_tool_rounds=3)
+            agents[agent_id] = Agent(config, max_tool_rounds=args.max_tool_rounds)
 
     started = time.monotonic()
 

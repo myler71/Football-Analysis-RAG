@@ -14,10 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator
 
+from src.platform.runtime import DATA_DIR
+
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = PROJECT_ROOT / "data"
 SQLITE_DB_PATH = DATA_DIR / "football_platform.db"
 
 _PG_AVAILABLE = None

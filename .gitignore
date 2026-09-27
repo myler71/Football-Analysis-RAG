@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .env
+.demo-state
 venv/
 .venv/
 outputs/*.json
@@ -15,3 +16,5 @@ frontend/dist/
 .pytest_cache/
 
 *.db
+.vercel
+.env*

@@ -4,6 +4,7 @@ import os
 import json
 import logging
 import hashlib
+import importlib.util
 import re
 
 from starlette.concurrency import run_in_threadpool
@@ -12,12 +13,18 @@ from threading import Lock
 from src.api.schemas import AnalyticsResponse
 from src.discussion.types import DiscussionResult
 from pathlib import Path
-from src.api.services.discussion_service import PROJECT_ROOT, OUTPUTS_DIR
+from src.platform import runtime
 
 
 logger = logging.getLogger(__name__)
 _analytics_lock = Lock()
-REPORTS_DIR = PROJECT_ROOT / "reports"
+OUTPUTS_DIR = runtime.OUTPUTS_DIR
+REPORTS_DIR = runtime.REPORTS_DIR
+
+
+def _embeddings_available() -> bool:
+    """Whether the optional local embedding scorer is installed here."""
+    return importlib.util.find_spec("sentence_transformers") is not None
 
 
 def _load_cached_analytics(
@@ -275,7 +282,7 @@ def _load_or_compute_analytics(
                     raw = engine.analyze(
                         source_path,
                         use_llm=False,
-                        use_embeddings=True,
+                        use_embeddings=_embeddings_available(),
                         positive_pole=pos_pole,
                         negative_pole=neg_pole,
                         counterfactual_ablation=False,

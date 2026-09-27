@@ -794,7 +794,7 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic: prompt, num_rounds: selectedRounds, num_agents: selectedAgentCount, dynamic_personas: false }),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(300000),
       });
 
       if (generation !== discussionRunRef.current) return;

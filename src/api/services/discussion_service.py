@@ -11,6 +11,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from threading import BoundedSemaphore
 from fastapi import HTTPException
+from starlette.concurrency import run_in_threadpool
 from src.api.schemas import StartDiscussionRequest, StartDiscussionResponse
 from src.api.schemas import DiscussionStatusResponse
 from src.discussion.persistence import load_discussion
@@ -19,10 +20,11 @@ from src.discussion.types import (
     DiscussionMetadata,
     DiscussionResult,
 )
+from src.platform import artifact_store, runtime
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+OUTPUTS_DIR = runtime.OUTPUTS_DIR
 _runtime_status: dict[str, DiscussionStatusResponse] = {}
 
 # Details of accepted runs that have not written their first checkpoint yet,
@@ -54,6 +56,21 @@ def _queue_depth() -> int:
 
 _runner_slots = BoundedSemaphore(_queue_depth())
 _worker_state = "ready"
+
+
+def _env_cap(name: str, default: int) -> int:
+    """Read an integer cap from the environment, ignoring malformed values."""
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+# Deployment caps: one request must fit inside the function budget. The
+# defaults keep the full range the request schema allows, so only a
+# deployment that configures a budget clamps a run.
+MAX_ROUNDS = _env_cap("DISCUSSION_MAX_ROUNDS", 10)
+MAX_AGENTS = _env_cap("DISCUSSION_MAX_AGENTS", 6)
 
 
 def _file_version(path: Path) -> tuple[int, int, int, int]:
@@ -166,6 +183,11 @@ def get_saved_discussion(
     if path.parent != directory:
         raise ValueError("Discussion file must be inside the outputs directory.")
 
+    # Another instance may have produced this record; fetch it before the
+    # retry loop so the version-checked read below works on a materialised file.
+    if not path.is_file() and artifact_store.enabled():
+        artifact_store.pull_discussion(discussion_id, path)
+
     # Retry if a checkpoint replaces the file while we are reading it.
     for _ in range(3):
         if not path.is_file():
@@ -192,6 +214,32 @@ def get_saved_discussion(
     raise RuntimeError("Discussion is being updated. Please retry shortly.")
 
 
+def _summarize(path: Path) -> dict:
+    """Build the history entry for one saved discussion file."""
+    discussion = get_saved_discussion(path.stem, output_dir=path.parent)
+    config = discussion.config
+    num_messages = len(discussion.messages)
+    metadata = discussion.metadata
+
+    with _status_lock:
+        tracked = _runtime_status.get(config.discussion_id)
+        if tracked and tracked.status in _IN_FLIGHT_STATUSES:
+            disk_status = tracked.status
+        else:
+            disk_status = "completed" if num_messages > 0 else "failed"
+
+    return {
+        "discussion_id": config.discussion_id,
+        "topic": config.topic,
+        "num_agents": len(config.agent_ids),
+        "num_rounds": config.num_rounds,
+        "num_messages": num_messages,
+        "timestamp": config.timestamp,
+        "status": disk_status,
+        "has_errors": bool(metadata.errors),
+    }
+
+
 def list_saved_discussions(
     output_dir: str | Path | None = None,
 ) -> list[dict]:
@@ -210,35 +258,28 @@ def list_saved_discussions(
             continue
 
         try:
-            discussion = get_saved_discussion(
-                path.stem,
-                output_dir=directory,
-            )
+            summaries.append(_summarize(path))
         except (ValueError, OSError):
             # Analytics JSON, malformed discussions, or unavailable files.
             continue
 
-        config = discussion.config
-        num_messages = len(discussion.messages)
-        metadata = discussion.metadata
+    # Records produced by another instance are restored on first read, so
+    # history stays complete whichever instance answers the request.
+    if artifact_store.enabled():
+        local_ids = {
+            path.stem
+            for path in directory.glob("*.json")
+            if not path.name.startswith(".")
+        }
 
-        with _status_lock:
-            tracked = _runtime_status.get(config.discussion_id)
-            if tracked and tracked.status in _IN_FLIGHT_STATUSES:
-                disk_status = tracked.status
-            else:
-                disk_status = "completed" if num_messages > 0 else "failed"
+        for discussion_id in artifact_store.list_discussion_ids():
+            if discussion_id in local_ids:
+                continue
 
-        summaries.append({
-            "discussion_id": config.discussion_id,
-            "topic": config.topic,
-            "num_agents": len(config.agent_ids),
-            "num_rounds": config.num_rounds,
-            "num_messages": num_messages,
-            "timestamp": config.timestamp,
-            "status": disk_status,
-            "has_errors": bool(metadata.errors),
-        })
+            try:
+                summaries.append(_summarize(directory / f"{discussion_id}.json"))
+            except (ValueError, OSError):
+                continue
 
     # Surface accepted runs that have not checkpointed to disk yet, so a new
     # discussion appears in history/active lists the moment it is started.
@@ -319,6 +360,24 @@ def get_runtime_status(
 
 
 
+def _mirror_discussion(discussion_id: str) -> None:
+    """Publish the local record so every instance can serve it.
+
+    Runs after the runner returns for both success and failure, so partial
+    records stay inspectable from any serverless instance.
+    """
+    if not artifact_store.enabled():
+        return
+
+    path = OUTPUTS_DIR / f"{discussion_id}.json"
+
+    try:
+        if path.is_file():
+            artifact_store.push_discussion(discussion_id, path.read_bytes())
+    except OSError as exc:
+        logger.warning("Could not read discussion %s for mirroring: %s", discussion_id, exc)
+
+
 def _execute_discussion(
     discussion_id: str,
     request: StartDiscussionRequest,
@@ -339,7 +398,10 @@ def _execute_discussion(
     if getattr(request, "force_regenerate", False):
         cmd.append("--force-regenerate")
 
-    return run_discussion(cmd)
+    exit_code = run_discussion(cmd)
+    _mirror_discussion(discussion_id)
+
+    return exit_code
 
 
 def _run_discussion_job(
@@ -426,6 +488,17 @@ async def enqueue_discussion(
     job_request = request.model_copy(deep=True)
     job_request.topic = job_request.topic.strip()
 
+    # Clamp rather than reject: the full-capability UI may ask for more than
+    # this deployment can afford, and a rejected request reads as a broken app.
+    if job_request.num_rounds > MAX_ROUNDS or job_request.num_agents > MAX_AGENTS:
+        logger.warning(
+            "Clamping discussion %s to %d rounds / %d agents (deployment caps).",
+            discussion_id, min(job_request.num_rounds, MAX_ROUNDS),
+            min(job_request.num_agents, MAX_AGENTS),
+        )
+        job_request.num_rounds = min(job_request.num_rounds, MAX_ROUNDS)
+        job_request.num_agents = min(job_request.num_agents, MAX_AGENTS)
+
     with _status_lock:
         if _worker_state != "ready":
             raise HTTPException(
@@ -451,7 +524,7 @@ async def enqueue_discussion(
         _runtime_status[discussion_id] = DiscussionStatusResponse(
             discussion_id=discussion_id,
             status="queued",
-            total_rounds=request.num_rounds,
+            total_rounds=job_request.num_rounds,
             message="Waiting for the discussion worker.",
         )
 
@@ -460,7 +533,7 @@ async def enqueue_discussion(
         # worker generates them, so they stay undisclosed until then.
         runtime_details: dict = {
             "topic": job_request.topic,
-            "num_rounds": request.num_rounds,
+            "num_rounds": job_request.num_rounds,
             "agent_ids": [],
             "persona_files": {},
             "graph": {},
@@ -478,22 +551,43 @@ async def enqueue_discussion(
 
         _pending_details[discussion_id] = runtime_details
 
-        try:
-            _executor.submit(
-                _run_discussion_job,
-                discussion_id,
-                job_request,
-            )
-        except Exception:
-            _runtime_status.pop(discussion_id, None)
-            _pending_details.pop(discussion_id, None)
-            _runner_slots.release()
-            logger.exception("Could not schedule discussion %s", discussion_id)
+        # A background thread does not survive the HTTP response inside a
+        # serverless function, so the run happens within this request instead.
+        inline = runtime.is_serverless()
 
-            raise HTTPException(
-                status_code=503,
-                detail="Discussion worker is unavailable.",
-            )
+        if not inline:
+            try:
+                _executor.submit(
+                    _run_discussion_job,
+                    discussion_id,
+                    job_request,
+                )
+            except Exception:
+                _runtime_status.pop(discussion_id, None)
+                _pending_details.pop(discussion_id, None)
+                _runner_slots.release()
+                logger.exception("Could not schedule discussion %s", discussion_id)
+
+                raise HTTPException(
+                    status_code=503,
+                    detail="Discussion worker is unavailable.",
+                )
+
+    if inline:
+        # Run outside the lock: _run_discussion_job publishes its own status.
+        await run_in_threadpool(_run_discussion_job, discussion_id, job_request)
+
+        final_status = get_runtime_status(discussion_id)
+
+        return StartDiscussionResponse(
+            discussion_id=discussion_id,
+            status=(
+                "completed"
+                if final_status is not None and final_status.status == "completed"
+                else "failed"
+            ),
+            message=final_status.message if final_status else "Discussion finished.",
+        )
 
     return StartDiscussionResponse(
         discussion_id=discussion_id,

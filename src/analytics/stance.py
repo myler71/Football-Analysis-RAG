@@ -282,7 +282,7 @@ def compute_opinion_trajectories(discussion_data, use_llm=False, llm_client=None
     method = 'llm' if use_llm else 'embedding_projection' if use_embeddings else 'self_report_rules'
     llm_scores = score_snapshots_with_llm(topic, opinions, llm_client,
                                          effective_pos_pole, effective_neg_pole) if use_llm else {}
-    model = get_embedding_model() if (use_embeddings or not use_llm) and opinions else None
+    model = get_embedding_model() if use_embeddings and opinions else None
     trajectories = {}
     for aid in agent_ids:
         points = []

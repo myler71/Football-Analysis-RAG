@@ -1,5 +1,6 @@
 """Coordinates the agents participating in a discussion."""
 
+import os
 import time
 from dataclasses import asdict
 from typing import Callable
@@ -7,6 +8,16 @@ from src.agent.agent import Agent
 from src.discussion.models import DiscussionMessage, DiscussionState
 from src.discussion.router import GraphRouter
 from src.agent.types  import AgentResponse 
+
+
+def _retry_attempts() -> int:
+    """Total attempts per agent turn; a serverless run cannot afford retries."""
+    return max(1, int(os.environ.get("AGENT_RETRY_ATTEMPTS", "3")))
+
+
+def _retry_backoff_seconds() -> float:
+    """Base backoff between turn retries, in seconds."""
+    return max(0.0, float(os.environ.get("AGENT_RETRY_BACKOFF_SECONDS", "30")))
 
 
 
@@ -95,11 +106,16 @@ class DiscussionOrchestrator:
         task: str,
         state: DiscussionState,
         received_messages: list[dict[str, str]] | None = None,
-        attempts: int = 3,
-        backoff_seconds: float = 30.0,
+        attempts: int | None = None,
+        backoff_seconds: float | None = None,
     ) -> AgentResponse:
         """Retry a failed agent turn; one transient provider outage must not
         abort a multi-minute discussion run."""
+        attempts = _retry_attempts() if attempts is None else attempts
+        backoff_seconds = (
+            _retry_backoff_seconds() if backoff_seconds is None else backoff_seconds
+        )
+
         for attempt in range(attempts):
             try:
                 return self._run_agent(

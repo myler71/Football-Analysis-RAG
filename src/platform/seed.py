@@ -5,7 +5,6 @@ profile memories, custom personas, and sample personalized reports.
 import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from uuid import uuid4
 
 from src.agent.types import RetrievedSource
@@ -24,10 +23,11 @@ from src.platform.models import PersonaCreate
 from src.platform.personas import create_profile_persona
 from src.platform.reports import generate_profile_report
 
+from src.platform import runtime
+
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+OUTPUTS_DIR = runtime.OUTPUTS_DIR
 
 
 def seed_database_and_discussions():
@@ -399,3 +399,15 @@ def seed_database_and_discussions():
         logger.warning("Auto-generating seed report failed: %s", e)
 
     logger.info("Successfully seeded database with discussions %s, %s and demo user %s.", disc1_id, disc2_id, demo_email)
+
+
+def ensure_demo_state() -> None:
+    """Seed the writable state directory once per process (i.e. per cold start)."""
+    from src.platform.runtime import STATE_ROOT
+
+    marker = STATE_ROOT / ".demo-state"
+    if marker.exists():
+        return
+    STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    seed_database_and_discussions()
+    marker.write_text("ready", encoding="utf-8")

@@ -7,6 +7,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from src.discussion.persistence import load_discussion_by_id
+from src.platform import runtime
 from src.platform.db import get_db_cursor
 from src.platform.models import ProfileOut, ReportOut
 from src.platform.profile import get_profile_by_id
@@ -29,7 +30,7 @@ def generate_profile_report(
     p_type = profile.profile_type.lower()
 
     # Load discussion record
-    disc = load_discussion_by_id(discussion_id)
+    disc = load_discussion_by_id(discussion_id, output_dir=runtime.OUTPUTS_DIR)
     topic = disc.config.topic
     messages = disc.messages
 
