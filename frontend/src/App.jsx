@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Analytics } from '@vercel/analytics/react';
 import LandingPage from './components/LandingPage';
 import MarkdownPreview from './components/MarkdownPreview';
 import AgentCommunicationPitch from './components/AgentCommunicationPitch';
@@ -4326,6 +4327,7 @@ export default function App() {
         onRemovePersonaFromArena={handleRemovePersonaFromArena}
         onPersonasLoaded={registerCustomPersonas}
       />
+      <Analytics />
     </div>
   );
 }
